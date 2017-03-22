@@ -12,7 +12,8 @@
   "scripts": {
     "compile": "tsc",
     "predist": "rm -rf dist/ && mkdir dist/ && npm run compile",
-    "dist": "browserify index.js --standalone marble-engine > dist/marble-engine.js"
+    "dist": "browserify index.js --standalone marble-engine > dist/marble-engine.js",
+    "postinstall": "npm run compile"
   },
   "repository": {
     "type": "git",
