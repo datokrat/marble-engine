@@ -1,0 +1,26 @@
+{
+  "name": "marble-engine",
+  "version": "0.0.1",
+  "description": "A highly predictable functional reactive stream library in JavaScript with a notion of concurrency Edit",
+  "main": "index.js",
+  "dependencies": {
+    "browserify": "^14.1.0",
+    "typescript": "^2.2.1"
+  },
+  "devDependencies": {},
+  "scripts": {
+    "compile": "tsc",
+    "predist": "rm -rf dist/ && mkdir dist/ && npm run compile",
+    "dist": "browserify index.js --standalone marble-engine > dist/marble-engine.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/datokrat/marble-engine.git"
+  },
+  "author": "Paul Reichert",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/datokrat/marble-engine/issues"
+  },
+  "homepage": "https://github.com/datokrat/marble-engine#readme"
+}
