@@ -5,6 +5,7 @@
   "main": "index.js",
   "typings": "index.d.ts",
   "dependencies": {
+    "@types/core-js": "^0.9.36",
     "browserify": "^14.1.0",
     "typescript": "^2.2.1"
   },
@@ -12,7 +13,8 @@
   "scripts": {
     "compile": "tsc",
     "predist": "rm -rf dist/ && mkdir dist/ && npm run compile",
-    "dist": "browserify index.js --standalone marble-engine > dist/marble-engine.js"
+    "dist": "browserify index.js --standalone marble-engine > dist/marble-engine.js",
+    "postinstall": "npm run compile"
   },
   "repository": {
     "type": "git",
