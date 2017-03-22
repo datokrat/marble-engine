@@ -38,4 +38,5 @@ jspm_packages
 
 # Build results
 index.js
+index.d.ts
 modules/

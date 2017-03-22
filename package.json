@@ -3,6 +3,7 @@
   "version": "0.0.1",
   "description": "A highly predictable functional reactive stream library in JavaScript with a notion of concurrency Edit",
   "main": "index.js",
+  "typings": "index.d.ts",
   "dependencies": {
     "browserify": "^14.1.0",
     "typescript": "^2.2.1"
