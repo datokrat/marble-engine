@@ -2,6 +2,9 @@ import { Maybe, Just, nothing, just, isJust, isNothing, hasValue } from "./modul
 import { UnassignedSinkException } from "./modules/exceptions";
 import { Clock, TaskQueue, TimedMaybe, StreamBase, Stream, TickableBase, TickableParentBase, TickState, Sink, Tickable, Observable } from "./modules/streambase";
 
+export * from "./modules/maybe";
+export * from "./modules/streambase";
+
 export abstract class ConvenientStreamBase<T> extends StreamBase<T> {
   constructor(protected readonly clock: Clock, debugString: string) {
     super(debugString);
@@ -11,8 +14,14 @@ export abstract class ConvenientStreamBase<T> extends StreamBase<T> {
     return new MapStream(this.clock, this, project);
   }
 
-  public mergeWith<U>(other$: Stream<U>): ConvenientStreamBase<[Maybe<T>, Maybe<U>]> {
-    return new MergeStream<T | U>(this.clock, this, other$) as any;
+  public filter(predicate: (t: T) => boolean): ConvenientStreamBase<T> {
+    return new FilterStream(this.clock, this, predicate);
+  }
+
+  public mergeWith<U>(other$: Stream<U>): ConvenientStreamBase<[Maybe<T>, Maybe<U>]>;
+  public mergeWith(...other$s: Stream<T>[]): ConvenientStreamBase<Maybe<T>[]>;
+  public mergeWith(other$: Stream<any>): ConvenientStreamBase<Maybe<any>[]> {
+    return new MergeStream<any>(this.clock, this, other$) as any;
   }
 
   public fold<U>(reduce: (prev: U, curr: T) => U, initialState: U): ConvenientStreamBase<U> {
@@ -21,6 +30,14 @@ export abstract class ConvenientStreamBase<T> extends StreamBase<T> {
 
   public switch(this: ConvenientStreamBase<T & Stream<any>>): T {
     return new SwitchStream(this.clock, this) as any;
+  }
+
+  public flatten(this: ConvenientStreamBase<T & Stream<any>>): T {
+    return new FlattenStream(this.clock, this) as any;
+  }
+
+  public compose<U>(fn: ($: this) => ConvenientStreamBase<U>) {
+    return fn(this);
   }
 }
 
@@ -60,6 +77,12 @@ export class SourceStream<T> extends GlobalStreamBase<T> {
 
   public initialize(state: TickState) {
     this.state = state;
+    if (this.state === TickState.INITIALIZED || this.state === TickState.PASSIVE) {
+      this.value.nextTick();
+    }
+    if (this.state === TickState.PASSIVE) {
+      this.value.set(nothing());
+    }
   }
 }
 
@@ -98,6 +121,40 @@ export class MapStream<T, U> extends GlobalStreamBase<U> {
   }
 }
 
+export class FilterStream<T> extends GlobalStreamBase<T> {
+  constructor(
+    clock: Clock,
+    private readonly origin: Stream<T>,
+    private readonly predicate: (t: T) => boolean) {
+
+    super(clock, `${origin.debugString}.filter`, false);
+    this.connectWithEngine();
+  }
+
+  public initialize(state: TickState) {
+    this.state = state;
+
+    if (this.state === TickState.INITIALIZED || this.state === TickState.PASSIVE) {
+      this.value.nextTick();
+      const originMaybe = this.origin.getValue();
+      if (isJust(originMaybe)) {
+        this.notify(this.origin, originMaybe.value);
+      }
+    }
+
+    this.origin.subscribe(this.notify);
+  }
+
+  private notify = (observable: Observable, value: Maybe<any>) => {
+    this.expectSender(observable, this.origin);
+    if (isJust(value) && this.predicate(value.value)) {
+      this.value.set(just(value.value));
+    } else {
+      this.value.set(nothing());
+    }
+  }
+}
+
 export class MergeStream<T> extends GlobalStreamBase<Maybe<T>[]> {
   private readonly values: TimedMaybe<Maybe<T>>[];
   private readonly origins: Stream<T>[];
@@ -117,6 +174,9 @@ export class MergeStream<T> extends GlobalStreamBase<Maybe<T>[]> {
   protected safeBeginTick() {
     super.safeBeginTick();
     this.values.forEach(v => v.nextTick());
+  }
+
+  protected safeOnTick() {
     this.invokeIfPossible();
   }
 
@@ -135,10 +195,10 @@ export class MergeStream<T> extends GlobalStreamBase<Maybe<T>[]> {
 
     if (wereAllSet) {
       const finalValues = maybes.map((m: Just<Maybe<T>>) => m.value);
-      const isNoneActive = finalValues.reduce((ok, maybe) => ok && isNothing(maybe), true);
-      let value: Maybe<Maybe<T>[]> = isNoneActive
+      // const isNoneActive = finalValues.reduce((ok, maybe) => ok && isNothing(maybe), true);
+      let value: Maybe<Maybe<T>[]> = /* isNoneActive
         ? nothing()
-        : just<Maybe<T>[]>(finalValues);
+        : */ just<Maybe<T>[]>(finalValues);
 
       this.value.set(value);
     }
@@ -175,7 +235,6 @@ export class FoldStream<T, U> extends GlobalStreamBase<U> {
 
     super(clock, `${origin.debugString}.fold`, false);
     this.connectWithEngine();
-    this.origin.subscribe(this.notifyOrigin);
 
     this.foldState = initialValue;
   }
@@ -192,11 +251,76 @@ export class FoldStream<T, U> extends GlobalStreamBase<U> {
     this.state = state;
 
     if (this.state === TickState.INITIALIZED || this.state === TickState.PASSIVE) {
-      const maybe = this.origin.getValue();
-      if (isJust(maybe)) {
-        this.notifyOrigin(this.origin, maybe.value);
+      // TODO: init this.value
+      this.value.nextTick();
+      this.clock.getQueue().push(() => {
+        const maybe = this.origin.getValue();
+        if (isJust(maybe)) {
+          this.notifyOrigin(this.origin, maybe.value);
+        }
+        this.origin.subscribe(this.notifyOrigin);
+      });
+    } else {
+      this.origin.subscribe(this.notifyOrigin);
+    }
+  }
+}
+
+export class FlattenStream<T> extends GlobalStreamBase<T> {
+  private stream: TimedMaybe<Maybe<Stream<T>>> = new TimedMaybe<Maybe<Stream<T>>>(() => {}, this.debugString);
+
+  constructor(
+    clock: Clock,
+    private readonly metaStream: Stream<Stream<T>>) {
+
+    super(clock, `${metaStream.debugString}.flatten`, false);
+    this.connectWithEngine();
+  }
+
+  public initialize(state: TickState) {
+
+    if (state === TickState.INITIALIZED || state === TickState.PASSIVE) {
+      this.value.nextTick();
+      this.stream.nextTick();
+      const metaValue = this.metaStream.getValue();
+      if (isJust(metaValue)) {
+        this.notifyNextStream(this.metaStream, metaValue.value);
       }
     }
+
+    this.metaStream.subscribe(this.notifyNextStream);
+  }
+
+  protected safeBeginTick() {
+    super.safeBeginTick();
+    this.stream.nextTick();
+  }
+
+  private notifyNextStream = (origin: Stream<any>, value: Maybe<any>) => {
+    this.expectSender(origin, this.metaStream);
+    this.listenToStream(value);
+  }
+
+  private listenToStream(value: Maybe<Stream<T>>) {
+    this.stream.set(value);
+    if (isJust(value)) {
+      this.clock.getQueue().push(() => {
+        value.value.subscribe(this.notifyNextValue);
+        const currentValue = value.value.getValue();
+        if (isJust(currentValue)) {
+          this.notifyNextValue(value.value, currentValue.value);
+        }
+      });
+    } else {
+      this.value.set(nothing());
+    }
+  }
+
+  private notifyNextValue = (origin: Stream<T>, value: Maybe<any>) => {
+    const stream = this.stream.get();
+    this.expectSenderCondition(isJust(stream) && hasValue(stream.value, origin));
+    origin.unsubscribe(this.notifyNextValue);
+    this.value.set(value);
   }
 }
 
@@ -209,14 +333,13 @@ export class SwitchStream<T> extends GlobalStreamBase<T> {
     clock: Clock,
     private readonly metaStream: Stream<Stream<T>>) {
 
-    super(clock, `${metaStream.debugString}.switch`, false);
-    this.connectWithEngine();
-    metaStream.subscribe(this.notifyNextStream);
+    super(clock, `${metaStream.debugString}.switch`);
+    metaStream.subscribe(this.notifyNextStream); // TODO
 
     this.nextStream = new TimedMaybe<Maybe<Stream<T>>>(() => {}, this.debugString);
   }
 
-  public safeBeginTick() {
+  protected safeBeginTick() {
     super.safeBeginTick();
 
     const next = this.running ? this.nextStream.get() : nothing();
@@ -257,6 +380,7 @@ export class SwitchStream<T> extends GlobalStreamBase<T> {
     this.state = state;
 
     if (this.state === TickState.INITIALIZED || this.state === TickState.PASSIVE) {
+      // TODO: initialize this.value
       const maybe = this.metaStream.getValue();
       if (isJust(maybe)) {
         this.notifyNextStream(this.metaStream, maybe);
@@ -466,8 +590,20 @@ export class MarbleEngine extends TickableBase {
     return new MergeStream(this.clock, ...streams);
   }
 
+  public mergeArray<T>(streams: Stream<T>[]): ConvenientStreamBase<Maybe<T>[]> {
+    return new MergeStream(this.clock, ...streams);
+  }
+
   public mimic<T>() {
     return new MimicStream<T>(this.clock);
+  }
+
+  public constantly<T>(value: T) {
+    return this.source("never").fold(x => x, value);
+  }
+
+  public source<T>(debugString: string) {
+    return new SourceStream<T>(this.getClock(), debugString);
   }
 
   public initialize(state: TickState) {
