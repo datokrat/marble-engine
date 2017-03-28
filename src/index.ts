@@ -28,12 +28,20 @@ export abstract class ConvenientStreamBase<T> extends StreamBase<T> {
     return new FoldStream(this.clock, this, reduce, initialState);
   }
 
+  public branchFold<U>(reduce: (prev: U, curr: T) => U, initial$: Stream<U>): ConvenientStreamBase<U> {
+    return new BranchFoldStream(this.clock, this, reduce, initial$);
+  }
+
   public switch(this: ConvenientStreamBase<T & Stream<any>>): T {
     return new SwitchStream(this.clock, this) as any;
   }
 
   public flatten(this: ConvenientStreamBase<T & Stream<any>>): T {
     return new FlattenStream(this.clock, this) as any;
+  }
+
+  public dropCurrent(): ConvenientStreamBase<T> {
+    return new DropCurrentStream(this.clock, this);
   }
 
   public compose<U>(fn: ($: this) => ConvenientStreamBase<U>) {
@@ -266,6 +274,62 @@ export class FoldStream<T, U> extends GlobalStreamBase<U> {
   }
 }
 
+export class BranchFoldStream<T, U> extends GlobalStreamBase<U> {
+  private foldState: U;
+  private hasInitialValue = false;
+  private hasSubscribedToAction = false;
+
+  constructor(clock: Clock, private readonly action: Stream<T>, private reduce: (prev: U, curr: T) => U, private readonly initial: Stream<U>) {
+    super(clock, `${action.debugString}.branchFold[${initial.debugString}]`, false);
+    this.connectWithEngine();
+  }
+
+  public initialize(state: TickState) {
+    this.state = state;
+
+    if (this.state === TickState.INITIALIZED || this.state === TickState.PASSIVE) {
+      this.value.nextTick();
+      this.clock.getQueue().push(() => {
+        const initial = this.initial.getValue();
+        if (isJust(initial)) {
+          this.notifyInitial(this.initial, initial.value);
+        }
+      });
+    }
+    this.initial.subscribe(this.notifyInitial);
+  }
+
+  private notifyInitial = (sender: Stream<any>, value: Maybe<any>) => {
+    this.expectSender(sender, this.initial);
+    this.expectSenderCondition(!this.hasInitialValue);
+    this.initial.unsubscribe(this.notifyInitial);
+    if (isJust(value)) {
+      this.foldState = value.value;
+      this.value.set(value);
+      this.hasInitialValue = true;
+    } else {
+      throw new Error("Initial value is Nothing");
+    }
+  }
+
+  public safeBeginTick() {
+    super.safeBeginTick();
+    if (!this.hasSubscribedToAction && this.hasInitialValue) {
+      this.hasSubscribedToAction = true;
+      this.action.subscribe(this.notifyAction);
+    }
+  }
+
+  private notifyAction = (sender: Stream<any>, value: Maybe<any>) => {
+    this.expectSender(sender, this.action);
+    this.expectSenderCondition(this.hasSubscribedToAction);
+    if (isJust(value)) {
+      this.foldState = this.reduce(this.foldState, value.value);
+    }
+    this.value.set(just(this.foldState));
+  };
+}
+
 export class FlattenStream<T> extends GlobalStreamBase<T> {
   private stream: TimedMaybe<Maybe<Stream<T>>> = new TimedMaybe<Maybe<Stream<T>>>(() => {}, this.debugString);
 
@@ -387,6 +451,34 @@ export class SwitchStream<T> extends GlobalStreamBase<T> {
       }
     }
   }
+}
+
+export class DropCurrentStream<T> extends GlobalStreamBase<T> {
+  private subscriptionPending = true;
+
+  constructor(clock: Clock, private readonly origin: Stream<T>) {
+    super(clock, `${origin.debugString}.dropCurrent`, false);
+    this.connectWithEngine();
+  }
+
+  public initialize(state: TickState) {
+    this.state = state;
+
+    if (this.state === TickState.INITIALIZED || this.state === TickState.PASSIVE) {
+      this.value.nextTick();
+      this.value.set(nothing());
+    }
+  }
+
+  public safeBeginTick() {
+    if (this.subscriptionPending) {
+      this.origin.subscribe(this.notify);
+    }
+  }
+
+  private notify = (origin: Stream<any>, value: Maybe<any>) => {
+    this.value.set(value);
+  };
 }
 
 export class MimicStream<T> extends GlobalStreamBase<T> {
@@ -599,7 +691,11 @@ export class MarbleEngine extends TickableBase {
   }
 
   public constantly<T>(value: T) {
-    return this.source("never").fold(x => x, value);
+    return this.never().fold(x => x, value);
+  }
+
+  public never(): ConvenientStreamBase<never> {
+    return this.source<never>("never");
   }
 
   public source<T>(debugString: string) {
