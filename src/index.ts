@@ -1,55 +1,55 @@
 import { Maybe, Just, nothing, just, isJust, isNothing, hasValue } from "./modules/maybe";
 import { UnassignedSinkException } from "./modules/exceptions";
-import { Clock, TaskQueue, TimedMaybe, StreamBase, Stream, TickableBase, TickableParentBase, TickState, Sink, Tickable, Observable } from "./modules/streambase";
+import { Clock, TaskQueue, TimedMaybe, StreamBase, CoreStream, TickableBase, TickableParentBase, TickState, Sink, Tickable, Observable } from "./modules/streambase";
 
 export * from "./modules/maybe";
 export * from "./modules/streambase";
 
-export abstract class ConvenientStreamBase<T> extends StreamBase<T> {
+export abstract class Stream<T> extends StreamBase<T> {
   constructor(protected readonly clock: Clock, debugString: string) {
     super(debugString);
   }
 
-  public map<U>(project: (t: T) => U): ConvenientStreamBase<U> {
+  public map<U>(project: (t: T) => U): Stream<U> {
     return new MapStream(this.clock, this, project);
   }
 
-  public filter(predicate: (t: T) => boolean): ConvenientStreamBase<T> {
+  public filter(predicate: (t: T) => boolean): Stream<T> {
     return new FilterStream(this.clock, this, predicate);
   }
 
-  public mergeWith<U>(other$: Stream<U>): ConvenientStreamBase<[Maybe<T>, Maybe<U>]>;
-  public mergeWith(...other$s: Stream<T>[]): ConvenientStreamBase<Maybe<T>[]>;
-  public mergeWith(other$: Stream<any>): ConvenientStreamBase<Maybe<any>[]> {
+  public mergeWith<U>(other$: CoreStream<U>): Stream<[Maybe<T>, Maybe<U>]>;
+  public mergeWith(...other$s: CoreStream<T>[]): Stream<Maybe<T>[]>;
+  public mergeWith(other$: CoreStream<any>): Stream<Maybe<any>[]> {
     return new MergeStream<any>(this.clock, [this, other$]) as any;
   }
 
-  public fold<U>(reduce: (prev: U, curr: T) => U, initialState: U): ConvenientStreamBase<U> {
+  public fold<U>(reduce: (prev: U, curr: T) => U, initialState: U): Stream<U> {
     return new FoldStream(this.clock, this, reduce, initialState);
   }
 
-  public branchFold<U>(reduce: (prev: U, curr: T) => U, initial$: Stream<U>): ConvenientStreamBase<U> {
+  public branchFold<U>(reduce: (prev: U, curr: T) => U, initial$: CoreStream<U>): Stream<U> {
     return new BranchFoldStream(this.clock, this, reduce, initial$);
   }
 
-  public switch(this: ConvenientStreamBase<T & Stream<any>>): T {
+  public switch(this: Stream<T & CoreStream<any>>): T {
     return new SwitchStream(this.clock, this) as any;
   }
 
-  public flatten(this: ConvenientStreamBase<T & Stream<any>>): T {
+  public flatten(this: Stream<T & CoreStream<any>>): T {
     return new FlattenStream(this.clock, this) as any;
   }
 
-  public dropCurrent(): ConvenientStreamBase<T> {
+  public dropCurrent(): Stream<T> {
     return new DropCurrentStream(this.clock, this);
   }
 
-  public compose<U>(fn: ($: this) => ConvenientStreamBase<U>) {
+  public compose<U>(fn: ($: this) => Stream<U>) {
     return fn(this);
   }
 }
 
-export class SourceStream<T> extends ConvenientStreamBase<T> {
+export class SourceStream<T> extends Stream<T> {
   constructor(clock: Clock, debugString: string) {
     super(clock, debugString);
     this.clock.register(this);
@@ -76,10 +76,10 @@ export class SourceStream<T> extends ConvenientStreamBase<T> {
   }
 }
 
-export class MapStream<T, U> extends ConvenientStreamBase<U> {
+export class MapStream<T, U> extends Stream<U> {
   constructor(
     clock: Clock,
-    private readonly origin: Stream<T>,
+    private readonly origin: CoreStream<T>,
     private readonly project: (t: T) => U) {
 
     super(clock, `${origin.debugString}.map`);
@@ -114,10 +114,10 @@ export class MapStream<T, U> extends ConvenientStreamBase<U> {
   }
 }
 
-export class FilterStream<T> extends ConvenientStreamBase<T> {
+export class FilterStream<T> extends Stream<T> {
   constructor(
     clock: Clock,
-    private readonly origin: Stream<T>,
+    private readonly origin: CoreStream<T>,
     private readonly predicate: (t: T) => boolean) {
 
     super(clock, `${origin.debugString}.filter`);
@@ -151,13 +151,13 @@ export class FilterStream<T> extends ConvenientStreamBase<T> {
   }
 }
 
-export class MergeStream<T> extends ConvenientStreamBase<Maybe<T>[]> {
+export class MergeStream<T> extends Stream<Maybe<T>[]> {
   private readonly values: TimedMaybe<Maybe<T>>[];
-  private readonly origins: Stream<T>[];
+  private readonly origins: CoreStream<T>[];
 
   constructor(
     clock: Clock,
-    origins: Stream<T>[],
+    origins: CoreStream<T>[],
     debugString: string = `merge[${origins.map(o => o.debugString)}]`) {
 
     super(clock, debugString);
@@ -225,12 +225,12 @@ export class MergeStream<T> extends ConvenientStreamBase<Maybe<T>[]> {
   }
 }
 
-export class FoldStream<T, U> extends ConvenientStreamBase<U> {
+export class FoldStream<T, U> extends Stream<U> {
   private foldState: U;
 
   constructor(
     clock: Clock,
-    private readonly origin: Stream<T>,
+    private readonly origin: CoreStream<T>,
     private readonly reduce: (prev: U, curr: T) => U,
     private initialValue: U) {
 
@@ -266,12 +266,12 @@ export class FoldStream<T, U> extends ConvenientStreamBase<U> {
   }
 }
 
-export class BranchFoldStream<T, U> extends ConvenientStreamBase<U> {
+export class BranchFoldStream<T, U> extends Stream<U> {
   private foldState: U;
   private hasInitialValue = false;
   private hasSubscribedToAction = false;
 
-  constructor(clock: Clock, private readonly action: Stream<T>, private reduce: (prev: U, curr: T) => U, private readonly initial: Stream<U>) {
+  constructor(clock: Clock, private readonly action: CoreStream<T>, private reduce: (prev: U, curr: T) => U, private readonly initial: CoreStream<U>) {
     super(clock, `${action.debugString}.branchFold[${initial.debugString}]`);
     this.clock.register(this);
   }
@@ -293,7 +293,7 @@ export class BranchFoldStream<T, U> extends ConvenientStreamBase<U> {
     }
   }
 
-  private notifyInitial = (sender: Stream<any>, value: Maybe<any>) => {
+  private notifyInitial = (sender: CoreStream<any>, value: Maybe<any>) => {
     this.expectSender(sender, this.initial);
     this.expectSenderCondition(!this.hasInitialValue);
     this.initial.unsubscribe(this.notifyInitial);
@@ -314,7 +314,7 @@ export class BranchFoldStream<T, U> extends ConvenientStreamBase<U> {
     }
   }
 
-  private notifyAction = (sender: Stream<any>, value: Maybe<any>) => {
+  private notifyAction = (sender: CoreStream<any>, value: Maybe<any>) => {
     this.expectSender(sender, this.action);
     this.expectSenderCondition(this.hasSubscribedToAction);
     if (isJust(value)) {
@@ -324,12 +324,12 @@ export class BranchFoldStream<T, U> extends ConvenientStreamBase<U> {
   };
 }
 
-export class FlattenStream<T> extends ConvenientStreamBase<T> {
-  private stream: TimedMaybe<Maybe<Stream<T>>> = new TimedMaybe<Maybe<Stream<T>>>(() => {}, this.debugString);
+export class FlattenStream<T> extends Stream<T> {
+  private stream: TimedMaybe<Maybe<CoreStream<T>>> = new TimedMaybe<Maybe<CoreStream<T>>>(() => {}, this.debugString);
 
   constructor(
     clock: Clock,
-    private readonly metaStream: Stream<Stream<T>>) {
+    private readonly metaStream: CoreStream<CoreStream<T>>) {
 
     super(clock, `${metaStream.debugString}.flatten`);
     this.clock.register(this);
@@ -354,12 +354,12 @@ export class FlattenStream<T> extends ConvenientStreamBase<T> {
     this.stream.nextTick();
   }
 
-  private notifyNextStream = (origin: Stream<any>, value: Maybe<any>) => {
+  private notifyNextStream = (origin: CoreStream<any>, value: Maybe<any>) => {
     this.expectSender(origin, this.metaStream);
     this.listenToStream(value);
   }
 
-  private listenToStream(value: Maybe<Stream<T>>) {
+  private listenToStream(value: Maybe<CoreStream<T>>) {
     this.stream.set(value);
     if (isJust(value)) {
       this.clock.getQueue().push(() => {
@@ -374,7 +374,7 @@ export class FlattenStream<T> extends ConvenientStreamBase<T> {
     }
   }
 
-  private notifyNextValue = (origin: Stream<T>, value: Maybe<any>) => {
+  private notifyNextValue = (origin: CoreStream<T>, value: Maybe<any>) => {
     const stream = this.stream.get();
     this.expectSenderCondition(isJust(stream) && hasValue(stream.value, origin));
     origin.unsubscribe(this.notifyNextValue);
@@ -382,18 +382,18 @@ export class FlattenStream<T> extends ConvenientStreamBase<T> {
   }
 }
 
-export class SwitchStream<T> extends ConvenientStreamBase<T> {
-  private lastStream: Maybe<Stream<T>> = nothing();
-  private nextStream: TimedMaybe<Maybe<Stream<T>>>;
+export class SwitchStream<T> extends Stream<T> {
+  private lastStream: Maybe<CoreStream<T>> = nothing();
+  private nextStream: TimedMaybe<Maybe<CoreStream<T>>>;
   private running = false;
 
   constructor(
     clock: Clock,
-    private readonly metaStream: Stream<Stream<T>>) {
+    private readonly metaStream: CoreStream<CoreStream<T>>) {
 
     super(clock, `${metaStream.debugString}.switch`);
 
-    this.nextStream = new TimedMaybe<Maybe<Stream<T>>>(() => {}, this.debugString);
+    this.nextStream = new TimedMaybe<Maybe<CoreStream<T>>>(() => {}, this.debugString);
 
     this.clock.register(this);
   }
@@ -458,10 +458,10 @@ export class SwitchStream<T> extends ConvenientStreamBase<T> {
   }
 }
 
-export class DropCurrentStream<T> extends ConvenientStreamBase<T> {
+export class DropCurrentStream<T> extends Stream<T> {
   private subscriptionPending = true;
 
-  constructor(clock: Clock, private readonly origin: Stream<T>) {
+  constructor(clock: Clock, private readonly origin: CoreStream<T>) {
     super(clock, `${origin.debugString}.dropCurrent`);
     this.clock.register(this);
   }
@@ -481,20 +481,20 @@ export class DropCurrentStream<T> extends ConvenientStreamBase<T> {
     }
   }
 
-  private notify = (origin: Stream<any>, value: Maybe<any>) => {
+  private notify = (origin: CoreStream<any>, value: Maybe<any>) => {
     this.value.set(value);
   };
 }
 
-export class MimicStream<T> extends ConvenientStreamBase<T> {
-  private original: Maybe<Stream<T>> = nothing();
+export class MimicStream<T> extends Stream<T> {
+  private original: Maybe<CoreStream<T>> = nothing();
 
   constructor(clock: Clock) {
     super(clock, "mimic");
     this.clock.register(this);
   }
 
-  public imitate(original: Stream<T>) {
+  public imitate(original: CoreStream<T>) {
     if (isNothing(this.original)) {
       this.original = just(original);
       original.subscribe(this.notifyOriginal);
@@ -575,11 +575,11 @@ export class MarbleEngine extends TickableBase {
     return this.buffers.get(sink);
   }
 
-  public merge<T>(...streams: Stream<T>[]): ConvenientStreamBase<Maybe<T>[]> {
+  public merge<T>(...streams: CoreStream<T>[]): Stream<Maybe<T>[]> {
     return new MergeStream(this.clock, streams);
   }
 
-  public mergeArray<T>(streams: Stream<T>[], debugString?: string): ConvenientStreamBase<Maybe<T>[]> {
+  public mergeArray<T>(streams: CoreStream<T>[], debugString?: string): Stream<Maybe<T>[]> {
     return new MergeStream(this.clock, streams, debugString);
   }
 
@@ -591,7 +591,7 @@ export class MarbleEngine extends TickableBase {
     return this.never().fold(x => x, value);
   }
 
-  public never(): ConvenientStreamBase<never> {
+  public never(): Stream<never> {
     return this.source<never>("never");
   }
 
