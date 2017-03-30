@@ -100,14 +100,17 @@ export class MapStream<T, U> extends ConvenientStreamBase<U> {
     this.state = state;
 
     if (this.state === TickState.INITIALIZED || this.state === TickState.PASSIVE) {
-      this.value.nextTick(); // TODO
-      const originMaybe = this.origin.getValue();
-      if (isJust(originMaybe)) {
-        this.applyProjection(originMaybe.value);
-      }
+      this.value.nextTick();
+      this.clock.getQueue().push(() => {
+        const originMaybe = this.origin.getValue();
+        if (isJust(originMaybe)) {
+          this.applyProjection(originMaybe.value);
+        }
+        this.origin.subscribe(this.notify);
+      });
+    } else {
+      this.origin.subscribe(this.notify);
     }
-
-    this.origin.subscribe(this.notify);
   }
 }
 
@@ -126,13 +129,16 @@ export class FilterStream<T> extends ConvenientStreamBase<T> {
 
     if (this.state === TickState.INITIALIZED || this.state === TickState.PASSIVE) {
       this.value.nextTick();
-      const originMaybe = this.origin.getValue();
-      if (isJust(originMaybe)) {
-        this.notify(this.origin, originMaybe.value);
-      }
+      this.clock.getQueue().push(() => {
+        const originMaybe = this.origin.getValue();
+        if (isJust(originMaybe)) {
+          this.notify(this.origin, originMaybe.value);
+        }
+        this.origin.subscribe(this.notify);
+      });
+    } else {
+      this.origin.subscribe(this.notify);
     }
-
-    this.origin.subscribe(this.notify);
   }
 
   private notify = (observable: Observable, value: Maybe<any>) => {
@@ -246,7 +252,6 @@ export class FoldStream<T, U> extends ConvenientStreamBase<U> {
     this.state = state;
 
     if (this.state === TickState.INITIALIZED || this.state === TickState.PASSIVE) {
-      // TODO: init this.value
       this.value.nextTick();
       this.clock.getQueue().push(() => {
         const maybe = this.origin.getValue();
@@ -281,9 +286,11 @@ export class BranchFoldStream<T, U> extends ConvenientStreamBase<U> {
         if (isJust(initial)) {
           this.notifyInitial(this.initial, initial.value);
         }
+        this.initial.subscribe(this.notifyInitial);
       });
+    } else {
+      this.initial.subscribe(this.notifyInitial);
     }
-    this.initial.subscribe(this.notifyInitial);
   }
 
   private notifyInitial = (sender: Stream<any>, value: Maybe<any>) => {
@@ -385,7 +392,6 @@ export class SwitchStream<T> extends ConvenientStreamBase<T> {
     private readonly metaStream: Stream<Stream<T>>) {
 
     super(clock, `${metaStream.debugString}.switch`);
-    metaStream.subscribe(this.notifyNextStream); // TODO
 
     this.nextStream = new TimedMaybe<Maybe<Stream<T>>>(() => {}, this.debugString);
 
@@ -433,10 +439,20 @@ export class SwitchStream<T> extends ConvenientStreamBase<T> {
     this.state = state;
 
     if (this.state === TickState.INITIALIZED || this.state === TickState.PASSIVE) {
-      // TODO: initialize this.value
-      const maybe = this.metaStream.getValue();
-      if (isJust(maybe)) {
-        this.notifyNextStream(this.metaStream, maybe);
+      this.value.nextTick();
+      this.clock.getQueue().push(() => {
+        const maybe = this.metaStream.getValue();
+        if (isJust(maybe)) {
+          this.notifyNextStream(this.metaStream, maybe);
+        }
+        this.metaStream.subscribe(this.notifyNextStream);
+      });
+    } else {
+      this.metaStream.subscribe(this.notifyNextStream);
+    }
+    if (this.state === TickState.PASSIVE) {
+      if (isNothing(this.lastStream)) {
+        this.value.set(nothing());
       }
     }
   }
