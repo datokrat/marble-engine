@@ -21,7 +21,7 @@ export abstract class ConvenientStreamBase<T> extends StreamBase<T> {
   public mergeWith<U>(other$: Stream<U>): ConvenientStreamBase<[Maybe<T>, Maybe<U>]>;
   public mergeWith(...other$s: Stream<T>[]): ConvenientStreamBase<Maybe<T>[]>;
   public mergeWith(other$: Stream<any>): ConvenientStreamBase<Maybe<any>[]> {
-    return new MergeStream<any>(this.clock, this, other$) as any;
+    return new MergeStream<any>(this.clock, [this, other$]) as any;
   }
 
   public fold<U>(reduce: (prev: U, curr: T) => U, initialState: U): ConvenientStreamBase<U> {
@@ -49,30 +49,12 @@ export abstract class ConvenientStreamBase<T> extends StreamBase<T> {
   }
 }
 
-export abstract class GlobalStreamBase<T> extends ConvenientStreamBase<T> {
-  constructor(clock: Clock, debugString: string, registerEngineNow = true) {
+export class SourceStream<T> extends ConvenientStreamBase<T> {
+  constructor(clock: Clock, debugString: string) {
     super(clock, debugString);
-    if (registerEngineNow) {
-      this.connectWithEngine();
-    }
-  }
-
-  protected connectWithEngine() {
     this.clock.register(this);
   }
-}
 
-export class StrictSourceStream<T> extends GlobalStreamBase<T> {
-  public setValue(value: Maybe<T>) {
-    this.value.set(value);
-  }
-
-  public initialize(state: TickState) {
-    this.state = state;
-  }
-}
-
-export class SourceStream<T> extends GlobalStreamBase<T> {
   public setValue(value: Maybe<T>) {
     this.value.set(value);
   }
@@ -94,14 +76,14 @@ export class SourceStream<T> extends GlobalStreamBase<T> {
   }
 }
 
-export class MapStream<T, U> extends GlobalStreamBase<U> {
+export class MapStream<T, U> extends ConvenientStreamBase<U> {
   constructor(
     clock: Clock,
     private readonly origin: Stream<T>,
     private readonly project: (t: T) => U) {
 
-    super(clock, `${origin.debugString}.map`, false);
-    this.connectWithEngine();
+    super(clock, `${origin.debugString}.map`);
+    this.clock.register(this);
   }
 
   private notify = (observable: Observable, value: Maybe<any>) => {
@@ -129,14 +111,14 @@ export class MapStream<T, U> extends GlobalStreamBase<U> {
   }
 }
 
-export class FilterStream<T> extends GlobalStreamBase<T> {
+export class FilterStream<T> extends ConvenientStreamBase<T> {
   constructor(
     clock: Clock,
     private readonly origin: Stream<T>,
     private readonly predicate: (t: T) => boolean) {
 
-    super(clock, `${origin.debugString}.filter`, false);
-    this.connectWithEngine();
+    super(clock, `${origin.debugString}.filter`);
+    this.clock.register(this);
   }
 
   public initialize(state: TickState) {
@@ -163,20 +145,21 @@ export class FilterStream<T> extends GlobalStreamBase<T> {
   }
 }
 
-export class MergeStream<T> extends GlobalStreamBase<Maybe<T>[]> {
+export class MergeStream<T> extends ConvenientStreamBase<Maybe<T>[]> {
   private readonly values: TimedMaybe<Maybe<T>>[];
   private readonly origins: Stream<T>[];
 
   constructor(
     clock: Clock,
-    ...origins: Stream<T>[]) {
+    origins: Stream<T>[],
+    debugString: string = `merge[${origins.map(o => o.debugString)}]`) {
 
-    super(clock, `merge[${origins.map(o => o.debugString)}]`, false);
+    super(clock, debugString);
 
     this.origins = origins;
     this.values = origins.map(o => new TimedMaybe<Maybe<T>>(this.invokeIfPossible, this.debugString));
 
-    this.connectWithEngine();
+    this.clock.register(this);
   }
 
   protected safeBeginTick() {
@@ -219,20 +202,24 @@ export class MergeStream<T> extends GlobalStreamBase<Maybe<T>[]> {
       this.value.nextTick(); // TODO: do it in TickableBase?
       this.values.forEach(v => v.nextTick());
 
-      this.origins.forEach((o, i) => {
-        const maybe = o.getValue();
-        if (isJust(maybe)) {
-          this.values[i].set(maybe.value);
-        }
+      this.clock.getQueue().push(() => {
+        this.origins.forEach((o, i) => {
+          const maybe = o.getValue();
+          if (isJust(maybe)) {
+            this.values[i].set(maybe.value);
+          }
+          o.subscribe(this.notify(i));
+        });
       });
-      this.invokeIfPossible();
-    }
 
-    this.origins.forEach((o, i) => o.subscribe(this.notify(i)));
+      this.invokeIfPossible();
+    } else {
+      this.origins.forEach((o, i) => o.subscribe(this.notify(i)));
+    }
   }
 }
 
-export class FoldStream<T, U> extends GlobalStreamBase<U> {
+export class FoldStream<T, U> extends ConvenientStreamBase<U> {
   private foldState: U;
 
   constructor(
@@ -241,8 +228,8 @@ export class FoldStream<T, U> extends GlobalStreamBase<U> {
     private readonly reduce: (prev: U, curr: T) => U,
     private initialValue: U) {
 
-    super(clock, `${origin.debugString}.fold`, false);
-    this.connectWithEngine();
+    super(clock, `${origin.debugString}.fold`);
+    this.clock.register(this);
 
     this.foldState = initialValue;
   }
@@ -274,14 +261,14 @@ export class FoldStream<T, U> extends GlobalStreamBase<U> {
   }
 }
 
-export class BranchFoldStream<T, U> extends GlobalStreamBase<U> {
+export class BranchFoldStream<T, U> extends ConvenientStreamBase<U> {
   private foldState: U;
   private hasInitialValue = false;
   private hasSubscribedToAction = false;
 
   constructor(clock: Clock, private readonly action: Stream<T>, private reduce: (prev: U, curr: T) => U, private readonly initial: Stream<U>) {
-    super(clock, `${action.debugString}.branchFold[${initial.debugString}]`, false);
-    this.connectWithEngine();
+    super(clock, `${action.debugString}.branchFold[${initial.debugString}]`);
+    this.clock.register(this);
   }
 
   public initialize(state: TickState) {
@@ -330,15 +317,15 @@ export class BranchFoldStream<T, U> extends GlobalStreamBase<U> {
   };
 }
 
-export class FlattenStream<T> extends GlobalStreamBase<T> {
+export class FlattenStream<T> extends ConvenientStreamBase<T> {
   private stream: TimedMaybe<Maybe<Stream<T>>> = new TimedMaybe<Maybe<Stream<T>>>(() => {}, this.debugString);
 
   constructor(
     clock: Clock,
     private readonly metaStream: Stream<Stream<T>>) {
 
-    super(clock, `${metaStream.debugString}.flatten`, false);
-    this.connectWithEngine();
+    super(clock, `${metaStream.debugString}.flatten`);
+    this.clock.register(this);
   }
 
   public initialize(state: TickState) {
@@ -388,7 +375,7 @@ export class FlattenStream<T> extends GlobalStreamBase<T> {
   }
 }
 
-export class SwitchStream<T> extends GlobalStreamBase<T> {
+export class SwitchStream<T> extends ConvenientStreamBase<T> {
   private lastStream: Maybe<Stream<T>> = nothing();
   private nextStream: TimedMaybe<Maybe<Stream<T>>>;
   private running = false;
@@ -401,6 +388,8 @@ export class SwitchStream<T> extends GlobalStreamBase<T> {
     metaStream.subscribe(this.notifyNextStream); // TODO
 
     this.nextStream = new TimedMaybe<Maybe<Stream<T>>>(() => {}, this.debugString);
+
+    this.clock.register(this);
   }
 
   protected safeBeginTick() {
@@ -453,12 +442,12 @@ export class SwitchStream<T> extends GlobalStreamBase<T> {
   }
 }
 
-export class DropCurrentStream<T> extends GlobalStreamBase<T> {
+export class DropCurrentStream<T> extends ConvenientStreamBase<T> {
   private subscriptionPending = true;
 
   constructor(clock: Clock, private readonly origin: Stream<T>) {
-    super(clock, `${origin.debugString}.dropCurrent`, false);
-    this.connectWithEngine();
+    super(clock, `${origin.debugString}.dropCurrent`);
+    this.clock.register(this);
   }
 
   public initialize(state: TickState) {
@@ -481,11 +470,12 @@ export class DropCurrentStream<T> extends GlobalStreamBase<T> {
   };
 }
 
-export class MimicStream<T> extends GlobalStreamBase<T> {
+export class MimicStream<T> extends ConvenientStreamBase<T> {
   private original: Maybe<Stream<T>> = nothing();
 
   constructor(clock: Clock) {
     super(clock, "mimic");
+    this.clock.register(this);
   }
 
   public imitate(original: Stream<T>) {
@@ -518,115 +508,6 @@ export class MimicStream<T> extends GlobalStreamBase<T> {
         this.value.set(nothing());
       }
     }
-  }
-}
-
-export class DomSelector extends TickableBase {
-  private streams = new Map<string, DomStream>();
-
-  constructor(private readonly clock: Clock, private readonly DOMSource: any) {
-    super("domSelector");
-    clock.register(this);
-  }
-
-  public select(selector: string) {
-    if (!this.streams.has(selector)) {
-      const stream = new DomStream(selector, this.DOMSource, this.clock);
-      this.clock.register(stream);
-      this.streams.set(selector, stream);
-    }
-
-    return this.streams.get(selector);
-  }
-
-  public initialize(state: TickState) {
-    this.state = state;
-  }
-}
-
-export class DomStream extends ConvenientStreamBase<{}> {
-  constructor(
-    private readonly selectorString: string,
-    DOMSource: any,
-    clock: Clock) {
-
-    super(clock, `dom[${selectorString}]`);
-
-    const that = this;
-
-    DOMSource.select(selectorString).events("click")
-      .subscribe({
-        next() { clock.nextTick(() => that.set({})) },
-        error() {},
-        complete() {},
-      });
-  }
-
-  private set(value: {}) {
-    this.value.set(just(value));
-  }
-
-  public safeOnTick() {
-    super.safeOnTick();
-    if (isNothing(this.value.get())) {
-      this.value.set(nothing());
-    }
-  }
-
-  public initialize(state: TickState) {
-    this.state = state;
-    if (state === TickState.INITIALIZED || state === TickState.PASSIVE) {
-      this.value.nextTick(); // TODO: do it in TickableBase?
-    }
-    if (state === TickState.PASSIVE) {
-      this.value.set(nothing()); // TODO
-    }
-  }
-}
-
-export class PortStreamSelector<T> extends TickableBase {
-  private ports = new Map<string, PortStream<T>>();
-
-  constructor(private readonly clock: Clock) {
-    super("portStreamSelector");
-    clock.register(this);
-  }
-
-  public select(port: string) {
-    if (!this.ports.has(port)) {
-      const stream = new PortStream<T>(port, this.clock);
-      this.clock.register(stream);
-      this.ports.set(port, stream);
-    }
-
-    return this.ports.get(port);
-  }
-
-  public initialize(state: TickState) {
-    this.state = state;
-  }
-}
-
-export class PortStream<T> extends ConvenientStreamBase<T> {
-  constructor(
-    private readonly port: string,
-    clock: Clock) {
-
-    super(clock, `port[${port}]`);
-  }
-
-  public set(value: T) {
-    this.value.set(just(value));
-  }
-
-  public safeOnTick() {
-    if (isNothing(this.value.get())) {
-      this.value.set(nothing());
-    }
-  }
-
-  public initialize(state: TickState) {
-    this.state = state;
   }
 }
 
@@ -679,11 +560,11 @@ export class MarbleEngine extends TickableBase {
   }
 
   public merge<T>(...streams: Stream<T>[]): ConvenientStreamBase<Maybe<T>[]> {
-    return new MergeStream(this.clock, ...streams);
+    return new MergeStream(this.clock, streams);
   }
 
-  public mergeArray<T>(streams: Stream<T>[]): ConvenientStreamBase<Maybe<T>[]> {
-    return new MergeStream(this.clock, ...streams);
+  public mergeArray<T>(streams: Stream<T>[], debugString?: string): ConvenientStreamBase<Maybe<T>[]> {
+    return new MergeStream(this.clock, streams, debugString);
   }
 
   public mimic<T>() {
