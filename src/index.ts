@@ -336,6 +336,7 @@ export class FlattenStream<T> extends Stream<T> {
   }
 
   public initialize(state: TickState) {
+    this.state = state;
 
     if (state === TickState.INITIALIZED || state === TickState.PASSIVE) {
       this.value.nextTick();
