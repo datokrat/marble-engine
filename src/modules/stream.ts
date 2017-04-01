@@ -22,24 +22,12 @@ export type Sink = Map<string, CoreStream<any>>;
 export interface KeepStream extends CoreStream<boolean> {}
 
 export abstract class StreamBase<T> extends TickableBase implements CoreStream<T> {
-  // isNothing <=> using unicast
-  private readonly keep$: Maybe<KeepStream>;
 
   protected readonly value: TimedMaybe<Maybe<T>>;
+  protected readonly observers = new Set<Observer>();
 
-  private readonly observers = new Set<Observer>();
-
-  constructor(clock: Clock, debugString: string, keepStream?: (self: StreamBase<T>) => KeepStream) {
+  constructor(clock: Clock, debugString: string) {
     super(clock, debugString);
-
-    if (keepStream !== undefined) {
-      this.keep$ = just(keepStream(this));
-    } else {
-      this.keep$ = nothing();
-      /* const mimic$ = new MimicStream<boolean>(clock, "keepMimic:" + debugString, self$ => self$);
-      this.keep$ = mimic$;
-      this.unicastKeepMimic$ = just(mimic$);*/
-    }
 
     this.value = new TimedMaybe<Maybe<T>>(value =>
       this.observers.forEach(observer => observer.notify(this, value)), debugString + "'");
@@ -50,40 +38,12 @@ export abstract class StreamBase<T> extends TickableBase implements CoreStream<T
 
     if (state === TickState.INITIALIZED || state === TickState.PASSIVE) {
       this.value.nextTick();
-      if (isJust(this.keep$)) {
-        const keepValue$ = this.keep$.value;
-        this.clock.getQueue().push(() => {
-          keepValue$.subscribe(this.keepObserver);
-          const maybe = keepValue$.getValue();
-          if (isJust(maybe)) {
-            this.keepObserver.notify(keepValue$, maybe.value);
-          }
-        });
-      }
-    } else {
-      if (isJust(this.keep$)) {
-        this.keep$.value.subscribe(this.keepObserver);
-      }
     }
   }
-
-  private keepObserver: Observer = {
-    notify: (sender: KeepStream, value: Maybe<boolean>) => {
-      this.expectSenderCondition(hasValue(this.keep$, sender));
-
-      if (isJust(value) && value.value === false) {
-        this.scheduleDisposal();
-      }
-    },
-    recipient: just(this)
-  };
 
   protected disposeNow() {
     super.disposeNow();
     this.clock.unregister(this);
-    if (isJust(this.keep$)) {
-      this.keep$.value.unsubscribe(this.keepObserver);
-    }
     this.observers.clear();
     this.value.dispose();
   }
@@ -99,24 +59,10 @@ export abstract class StreamBase<T> extends TickableBase implements CoreStream<T
 
   public subscribe(observer: Observer) {
     this.observers.add(observer);
-
-    if (isNothing(this.keep$) && this.observers.size > 1) {
-      throw new Error(`${this.debugString} is a unicast stream but received two subscriptions.`);
-    }
-    /* if (isJust(this.unicastKeepMimic$)) {
-      this.unicastKeepMimic$.value
-        .imitate(isJust(observer.recipient) ? observer.recipient.value.keep$ : new NeverStream(this.clock, "keep-default"));
-    }*/
   }
 
   public unsubscribe(observer: Observer) {
-    if (this.observers.has(observer)) {
-      this.observers.delete(observer);
-
-      if (isNothing(this.keep$)) {
-        this.scheduleDisposal();
-      }
-    }
+    this.observers.delete(observer);
   }
 
   protected expectSender(actual: Observable, expected: Observable) {
@@ -132,8 +78,12 @@ export abstract class StreamBase<T> extends TickableBase implements CoreStream<T
 
 export abstract class Stream<T> extends StreamBase<T> {
 
-  public map<U>(project: (t: T) => U, debugString?: string, keepStream?: (self: Stream<U>) => KeepStream): Stream<U> {
-    return new MapStream(this.clock, this, project, debugString, keepStream);
+  public keepUntil(keepStream: (self: Stream<T>) => KeepStream, debugString = this.debugString) {
+    return new KeepUntilStream(this.clock, this, keepStream, debugString);
+  }
+
+  public map<U>(project: (t: T) => U, debugString?: string): Stream<U> {
+    return new MapStream(this.clock, this, project, debugString);
   }
 
   public filter(predicate: (t: T) => boolean): Stream<T> {
@@ -146,8 +96,8 @@ export abstract class Stream<T> extends StreamBase<T> {
     return new MergeStream<any>(this.clock, [this, other$]) as any;
   }
 
-  public fold<U>(reduce: (prev: U, curr: T) => U, initialState: U, debugString?: string, keepStream?: (self: Stream<U>) => KeepStream): Stream<U> {
-    return new FoldStream(this.clock, this, reduce, initialState, debugString, keepStream);
+  public fold<U>(reduce: (prev: U, curr: T) => U, initialState: U, debugString?: string): Stream<U> {
+    return new FoldStream(this.clock, this, reduce, initialState, debugString);
   }
 
   public branchFold<U>(reduce: (prev: U, curr: T) => U, initial$: CoreStream<U>): Stream<U> {
@@ -171,14 +121,116 @@ export abstract class Stream<T> extends StreamBase<T> {
   }
 }
 
-export class SourceStream<T> extends Stream<T> {
+export class UnicastStream<T> extends Stream<T> {
+  public subscribe(observer: Observer) {
+    super.subscribe(observer);
+
+    if (this.observers.size > 1) {
+      throw new Error(`${this.debugString} is a unicast stream but received two subscriptions.`);
+    }
+  }
+
+  public unsubscribe(observer: Observer) {
+    const changed = this.observers.has(observer);
+    super.unsubscribe(observer);
+
+    if (changed && this.observers.size === 0) {
+      this.scheduleDisposal();
+    }
+  }
+}
+
+export class KeepAsLongAsStream<T, U> extends MulticastStream<T> {
+  constructor(clock: Clock, private readonly origin$: Stream<T>, private readonly owner$: Stream<U>, debugString = origin$.debugString) {
+    super(clock, debugString);
+    this.clock.register(this);
+  }
+
+  public initialize(state: TickState) {
+    super.initialize(state);
+
+    if (state === TickState.INITIALIZED || state === TickState.PASSIVE) {
+
+    }
+  }
+}
+
+export class KeepUntilStream<T> extends MulticastStream<T> {
+}
+
+export interface DisposalObservable {
+  subscribeDisposal(observer: (sender: this) => void);
+}
+
+export class MulticastStream<T> extends Stream<T> {
+  private readonly keep$: KeepStream;
 
   constructor(
     clock: Clock,
-    debugString: string,
-    keepStream: (self: Stream<T>) => KeepStream = self => new NeverStream(clock, `never(keep:${debugString})`, self => self)) {
+    private readonly main$: CoreStream<T>,
+    keepStream: (self: Stream<T>) => KeepStream,
+    debugString = `${main$.debugString}.keepUntil`) {
 
-    super(clock, debugString, keepStream);
+    super(clock, debugString);
+    this.keep$ = keepStream(this);
+    this.clock.register(this);
+  }
+
+  public initialize(state: TickState) {
+    super.initialize(state);
+
+    if (state === TickState.INITIALIZED || state === TickState.PASSIVE) {
+      this.clock.getQueue().push(() => {
+        const mainMaybe = this.main$.getValue();
+        if (isJust(mainMaybe)) {
+          this.mainObserver.notify(this.main$, mainMaybe.value);
+        }
+        this.main$.subscribe(this.mainObserver);
+
+        const keepMaybe = this.keep$.getValue();
+        if (isJust(keepMaybe)) {
+          this.keepObserver.notify(this.keep$, keepMaybe.value);
+        }
+        this.keep$.subscribe(this.keepObserver);
+      });
+    } else {
+      this.main$.subscribe(this.mainObserver);
+      this.keep$.subscribe(this.keepObserver);
+    }
+  }
+
+  public disposeNow() {
+    super.disposeNow();
+    this.main$.unsubscribe(this.mainObserver);
+    this.keep$.unsubscribe(this.keepObserver);
+  }
+
+  private mainObserver: Observer = {
+    notify: (sender: Observable, value: Maybe<any>) => {
+      this.expectSender(sender, this.main$);
+      this.value.set(value);
+    },
+    recipient: just(this)
+  };
+
+  private keepObserver: Observer = {
+    notify: (sender: Observable, value: Maybe<any>) => {
+      this.expectSender(sender, this.keep$);
+      if (isJust(value) && value.value === false) {
+        this.scheduleDisposal();
+      }
+    },
+    recipient: just(this)
+  };
+}
+
+export class SourceStream<T> extends UnicastStream<T> {
+
+  constructor(
+    clock: Clock,
+    debugString: string) {
+
+    super(clock, debugString);
     this.clock.register(this);
   }
 
@@ -200,9 +252,9 @@ export class SourceStream<T> extends Stream<T> {
   }
 }
 
-export class NeverStream extends Stream<never> {
-  constructor(clock: Clock, debugString?: string, keepStream?: (self: Stream<never>) => KeepStream) {
-    super(clock, debugString || `never`, keepStream);
+export class NeverStream extends UnicastStream<never> {
+  constructor(clock: Clock, debugString?: string) {
+    super(clock, debugString || `never`);
     this.clock.register(this);
   }
 
@@ -226,10 +278,9 @@ export class MapStream<T, U> extends Stream<U> {
     clock: Clock,
     private readonly origin: CoreStream<T>,
     private readonly project: (t: T) => U,
-    debugString = `${origin.debugString}.map`,
-    keepStream?: (self: Stream<U>) => KeepStream) {
+    debugString = `${origin.debugString}.map`) {
 
-    super(clock, debugString, keepStream);
+    super(clock, debugString);
     this.clock.register(this);
   }
 
@@ -272,10 +323,9 @@ export class FilterStream<T> extends Stream<T> {
   constructor(
     clock: Clock,
     private readonly origin: CoreStream<T>,
-    private readonly predicate: (t: T) => boolean,
-    keepStream?: (self: Stream<T>) => KeepStream) {
+    private readonly predicate: (t: T) => boolean) {
 
-    super(clock, `${origin.debugString}.filter`, keepStream);
+    super(clock, `${origin.debugString}.filter`);
     this.clock.register(this);
   }
 
@@ -321,10 +371,9 @@ export class MergeStream<T> extends Stream<Maybe<T>[]> {
   constructor(
     clock: Clock,
     origins: CoreStream<T>[],
-    debugString: string = `merge[${origins.map(o => o.debugString)}]`,
-    keepStream?: (self: Stream<Maybe<T>[]>) => KeepStream) {
+    debugString: string = `merge[${origins.map(o => o.debugString)}]`) {
 
-    super(clock, debugString, keepStream);
+    super(clock, debugString);
 
     this.origins = origins;
     this.values = origins.map(o => new TimedMaybe<Maybe<T>>(this.invokeIfPossible, this.debugString));
@@ -404,10 +453,9 @@ export class FoldStream<T, U> extends Stream<U> {
     private readonly origin: CoreStream<T>,
     private readonly reduce: (prev: U, curr: T) => U,
     private initialValue: U,
-    debugString = `${origin.debugString}.fold`,
-    keepStream?: (self: Stream<U>) => KeepStream) {
+    debugString = `${origin.debugString}.fold`) {
 
-    super(clock, debugString, keepStream);
+    super(clock, debugString);
     this.clock.register(this);
 
     this.foldState = initialValue;
@@ -455,10 +503,9 @@ export class BranchFoldStream<T, U> extends Stream<U> {
     clock: Clock,
     private readonly action: CoreStream<T>,
     private reduce: (prev: U, curr: T) => U,
-    private readonly initial: CoreStream<U>,
-    keepStream?: (self: Stream<U>) => KeepStream) {
+    private readonly initial: CoreStream<U>) {
 
-    super(clock, `${action.debugString}.branchFold[${initial.debugString}]`, keepStream);
+    super(clock, `${action.debugString}.branchFold[${initial.debugString}]`);
     this.clock.register(this);
   }
 
@@ -526,10 +573,9 @@ export class FlattenStream<T> extends Stream<T> {
 
   constructor(
     clock: Clock,
-    private readonly metaStream: CoreStream<CoreStream<T>>,
-    keepStream?: (self: Stream<T>) => KeepStream) {
+    private readonly metaStream: CoreStream<CoreStream<T>>) {
 
-    super(clock, `${metaStream.debugString}.flatten`, keepStream);
+    super(clock, `${metaStream.debugString}.flatten`);
     this.clock.register(this);
   }
 
@@ -602,10 +648,9 @@ export class SwitchStream<T> extends Stream<T> {
 
   constructor(
     clock: Clock,
-    private readonly metaStream: CoreStream<CoreStream<T>>,
-    keepStream?: (self: Stream<T>) => KeepStream) {
+    private readonly metaStream: CoreStream<CoreStream<T>>) {
 
-    super(clock, `${metaStream.debugString}.switch`, keepStream);
+    super(clock, `${metaStream.debugString}.switch`);
 
     this.nextStream = new TimedMaybe<Maybe<CoreStream<T>>>(() => {}, this.debugString);
 
@@ -690,10 +735,9 @@ export class DropCurrentStream<T> extends Stream<T> {
 
   constructor(
     clock: Clock,
-    private readonly origin: CoreStream<T>,
-    keepStream?: (self: Stream<T>) => KeepStream) {
+    private readonly origin: CoreStream<T>) {
 
-    super(clock, `${origin.debugString}.dropCurrent`, keepStream);
+    super(clock, `${origin.debugString}.dropCurrent`);
     this.clock.register(this);
   }
 
@@ -727,8 +771,8 @@ export class DropCurrentStream<T> extends Stream<T> {
 export class MimicStream<T> extends Stream<T> {
   private original: Maybe<CoreStream<T>> = nothing();
 
-  constructor(clock: Clock, debugStream = "mimic", keepStream?: (self: Stream<T>) => KeepStream) {
-    super(clock, debugStream, keepStream);
+  constructor(clock: Clock, debugStream = "mimic") {
+    super(clock, debugStream);
     this.clock.register(this);
   }
 
@@ -821,11 +865,11 @@ export class MarbleEngine extends TickableBase {
     return this.buffers.get(sink);
   }
 
-  public merge<T>(...streams: CoreStream<T>[]): Stream<Maybe<T>[]> {
+  public merge<T>(...streams: CoreStream<T>[]): UnicastStream<Maybe<T>[]> {
     return new MergeStream(this.clock, streams);
   }
 
-  public mergeArray<T>(streams: CoreStream<T>[], debugString?: string): Stream<Maybe<T>[]> {
+  public mergeArray<T>(streams: CoreStream<T>[], debugString?: string): UnicastStream<Maybe<T>[]> {
     return new MergeStream(this.clock, streams, debugString);
   }
 
@@ -833,12 +877,12 @@ export class MarbleEngine extends TickableBase {
     return new MimicStream<T>(this.clock, debugStream);
   }
 
-  public constantly<T>(value: T) {
+  public constantly<T>(value: T): UnicastStream<T> {
     return this.never().fold(x => x, value, `constantly[${value}]`);
   }
 
-  public never(debugStream?: string, keepStream?: (self: Stream<never>) => KeepStream): Stream<never> {
-    return new NeverStream(this.clock, "never", keepStream);
+  public never(debugStream?: string): UnicastStream<never> {
+    return new NeverStream(this.clock, "never");
   }
 
   public source<T>(debugString: string) {
