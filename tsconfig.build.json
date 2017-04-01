@@ -1,21 +1,20 @@
 {
-    "//": "Configuration for tests",
+    "//": "Configuration for build",
     "compilerOptions": {
         "module": "commonjs",
         "declaration": true,
         "target": "es5",
         "noImplicitAny": false,
         "strictNullChecks": true,
-        "sourceMap": true,
+        "sourceMap": false,
         "lib": [
             "es5",
             "dom"
         ],
-        "rootDir": "./",
-        "outDir": "testbuild/"
+        "rootDir": "src/",
+        "outDir": "./"
     },
-    "include": [
-      "tests/*.ts",
-      "tests/**/*.ts"
+    "files": [
+      "src/index.ts"
     ]
 }

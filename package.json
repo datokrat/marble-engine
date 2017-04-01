@@ -9,12 +9,19 @@
     "browserify": "^14.1.0",
     "typescript": "^2.2.1"
   },
-  "devDependencies": {},
+  "devDependencies": {
+    "chai": "^3.5.0",
+    "mocha": "^3.2.0",
+    "ts-node": "^3.0.2",
+    "typings": "^2.1.0"
+  },
   "scripts": {
-    "compile": "tsc",
+    "compile": "tsc -p tsconfig.build.json",
     "predist": "rm -rf dist/ && mkdir dist/ && npm run compile",
     "dist": "browserify index.js --standalone marble-engine > dist/marble-engine.js",
-    "postinstall": "npm run compile"
+    "postinstall": "npm run compile",
+    "test": "npm run mocha",
+    "mocha": "mocha tests/*.ts tests/**/*.ts --require ts-node/register || echo '' "
   },
   "repository": {
     "type": "git",
