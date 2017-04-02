@@ -1,9 +1,12 @@
 /// <reference path="../typings/globals/mocha/index.d.ts" />
 import {assert} from "chai";
-import {MarbleEngine, Stream, Maybe, isJust, just, nothing, evolving} from "../src";
+import {MarbleEngine, Stream, Maybe, isJust, just, nothing, evolving, setLogging} from "../src";
+import {log} from "../src/modules/logger";
 
 describe("test", () => {
-  /*it("creates a source stream", () => {
+  afterEach(() => setLogging(false));
+
+  it("creates a source stream", () => {
     const engine = new MarbleEngine();
     const source$ = engine.source<string>("source");
   });
@@ -11,8 +14,9 @@ describe("test", () => {
   it("derives multiple streams from a source", () => {
     const engine = new MarbleEngine("engine");
     const source$ = engine.source<string>("source");
-    const exclamation$ = source$.map(str => `${str}!`);
-    const question$ = source$.map(str => `${str}?`);
+    const multicastSource$ = source$.keepUntil(self => engine.never());
+    const exclamation$ = multicastSource$.map(str => `${str}!`);
+    const question$ = multicastSource$.map(str => `${str}?`);
 
     const buffer = engine.collect(toMap({exclamation$}))
 
@@ -39,19 +43,35 @@ describe("test", () => {
     ]);
   });
 
-  it("disposes an unused 'never' stream", () => {
+  it("disposes a unicast stream wrapped by a multicast stream", () => {
+    const engine = new MarbleEngine();
+    const keep$ = engine.source<boolean>("keep-source");
+    const never$ = engine.never();
+    const x$ = never$.keepUntil(self => keep$);
+
+    engine.nextTick(() => keep$.setValue(just(false)));
+    engine.nextTick(() => {});
+
+    assert.notInclude(engine.getClock().getRegistered(), x$, "x$ disposed");
+    assert.notInclude(engine.getClock().getRegistered(), never$, "never$ disposed");
+  });
+
+  it("disposes an unused unicast stream", () => {
     const engine = new MarbleEngine("engine");
     const keep$ = engine.source<boolean>("keep-source");
     const initialRegistered = engine.getClock().getRegistered();
     const never$ = engine.never();
-    const x$ = never$.map(nev => nev, "just another never stream", self => keep$);
+    const mapped$ = never$.map(nev => nev, "just another never stream");
+    const x$ = mapped$.keepUntil(self => keep$);
 
     const buffer = engine.collect(toMap({x$, never$}));
 
     engine.nextTick(() => keep$.setValue(just(false)));
     engine.nextTick(() => {});
 
-    assert.notInclude(engine.getClock().getRegistered(), never$);
+    assert.notInclude(engine.getClock().getRegistered(), x$, "x$ not registered anymore");
+    assert.notInclude(engine.getClock().getRegistered(), x$, "mapped$ not registered anymore");
+    assert.notInclude(engine.getClock().getRegistered(), never$, "never$ not registered anymore");
     assert.strictEqual(initialRegistered.length, engine.getClock().getRegistered().length);
 
     assert.deepEqual(buffer.map(toObject), [
@@ -64,7 +84,7 @@ describe("test", () => {
     const engine = new MarbleEngine("engine");
     const component$ = evolving(engine, current => engine.constantly(current), "String");
     const keep$ = engine.source<boolean>("keep-source");
-    const log$ = component$.map(str => `MESSAGE> ${str}`, "log", self => keep$);
+    const log$ = component$.map(str => `MESSAGE> ${str}`, "log").keepUntil(self => keep$);
 
     const buffer = engine.collect(toMap({log$}));
 
@@ -85,21 +105,21 @@ describe("test", () => {
       {},
       {}
     ]);
-  });*/
+  });
 
-  /*it("has no space-time leaks from switching", () => {
+  it("has no space-time leaks from switching", () => {
     const engine = new MarbleEngine();
     const component$ = evolving(engine, current => engine.constantly(current), "String");
-    const log$ = component$.map(str => `MESSAGE> ${str}`, "log", self => engine.never("keep:log", self => self));
+    const log$ = component$.map(str => `MESSAGE> ${str}`, "log").keepUntil(self => engine.never("keep:log").keepUntil(self => self));
 
-    [1,2,3,4,5,6,7,8,9,10].forEach((_, i) => {
+    array(10).forEach((_, i) => {
       const before = engine.getClock().getRegistered();
       engine.nextTick(() => {});
       const after = engine.getClock().getRegistered();
-      console.log(`Iteration ${i}: ${before.length} -> ${after.length}`);
-      console.log(`\t{after}\\{before} = Array(${minus(after, before).length}) = ${minus(after, before).map(x => x["debugString"])}`);
+      log(`Iteration ${i}: ${before.length} -> ${after.length}`);
+      log(`\t{after}\\{before} = Array(${minus(after, before).length}) = ${minus(after, before).map(x => x["debugString"])}`);
     });
-  });*/
+  });
 
   it("has no space-time leaks from switching", () => {
     const engine = new MarbleEngine();
@@ -112,8 +132,8 @@ describe("test", () => {
         meta$.setValue(just(engine.constantly("Hi")));
       });
       const after = engine.getClock().getRegistered();
-      console.log(`Iteration ${i}: ${before.length} -> ${after.length}`);
-      console.log(`\t{after}\\{before} = Array(${minus(after, before).length}) = ${minus(after, before).map(x => x["debugString"])}`);
+      log(`Iteration ${i}: ${before.length} -> ${after.length}`);
+      log(`\t{after}\\{before} = Array(${minus(after, before).length}) = ${minus(after, before).map(x => x["debugString"])}`);
     });
   });
 });

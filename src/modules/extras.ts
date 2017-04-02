@@ -7,7 +7,7 @@ export function evolving<T>(engine: MarbleEngine, evolve: (current: T) => Stream
     .fold((_, t) => evolve(t), evolve(initial))
     .switch()
     .fold((_, x) => x, initial)
-    .keepAsLongAs(result$.keep$);
+    .keepAsLongAs(result$);
   mimic$.imitate($);
   result$.imitate($);
   return result$;

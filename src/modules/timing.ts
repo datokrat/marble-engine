@@ -1,5 +1,6 @@
 import {TimingException, MultipleAssignmentsException} from "./exceptions";
 import {Maybe, just, nothing, isJust, isNothing} from "./maybe";
+import {log} from "./logger";
 
 export interface Tickable {
   beginTick(): void;
@@ -22,10 +23,18 @@ export function isDisposed(state: TickableState): state is DisposedState {
   return state === DisposedState.DISPOSED;
 }
 
-export abstract class TickableBase implements Tickable {
+export interface DisposalObservable {
+  subscribeDisposal(observer: DisposalObserver);
+  unsubscribeDisposal(observer: DisposalObserver);
+}
+
+export type DisposalObserver = (sender: DisposalObservable) => void;
+
+export abstract class TickableBase implements Tickable, DisposalObservable {
   protected state: TickableState = TickState.IDLE;
   private propagating = false;
   private isToBeDisposed = false;
+  private readonly disposalObservers = new Set<DisposalObserver>();
 
   constructor(
     protected readonly clock: Clock,
@@ -69,11 +78,31 @@ export abstract class TickableBase implements Tickable {
   }
 
   protected scheduleDisposal() {
-    this.isToBeDisposed = true;
+    log("scheduleDisposal", this.debugString);
+    if (this.clock.isInitializing()) {
+      this.disposeNow();
+    } else {
+      this.isToBeDisposed = true;
+    }
+    this.disposalObservers.forEach(observer => observer(this));
+  }
+
+  public subscribeDisposal(observer: DisposalObserver) {
+    if (!this.disposalObservers.has(observer)) {
+      this.disposalObservers.add(observer);
+      if (this.state === DisposedState.DISPOSED) {
+        observer(this);
+      }
+    }
+  }
+
+  public unsubscribeDisposal(observer: DisposalObserver) {
+    this.disposalObservers.delete(observer);
   }
 
   protected disposeNow() {
     this.state = DisposedState.DISPOSED;
+    this.disposalObservers.clear();
   }
 
   protected safeBeginTick(): void {}
@@ -85,6 +114,7 @@ export abstract class TickableBase implements Tickable {
 export class Clock {
   private readonly queue = new TaskQueue();
   private readonly tickables = new Set<Tickable>();
+  private initializing = false;
   private state = TickState.IDLE;
 
   public getQueue() {
@@ -111,15 +141,26 @@ export class Clock {
   }
 
   public nextTick(duringTick: () => void) {
+    log("=== beginTick ===");
     this.beginTick();
+    log("=== duringTick ===");
     this.duringTick(duringTick);
+    log("=== onTick ===");
     this.onTick();
+    log("=== endTick ===");
     this.endTick();
+    log("=== finished ===");
+  }
+
+  public isInitializing() {
+    return this.initializing;
   }
 
   private beginTick() {
     this.state = TickState.INITIALIZED;
+    this.initializing = true;
     this.propagate(tickable => tickable.beginTick());
+    this.initializing = false;
   }
 
   private duringTick(duringTick: () => void) {

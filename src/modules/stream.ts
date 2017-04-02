@@ -1,6 +1,7 @@
-import { Tickable, Clock, TickableBase, TimedMaybe, TickState, DisposedState } from "./timing";
+import { Tickable, Clock, TickableBase, TimedMaybe, TickState, DisposedState, DisposalObservable, DisposalObserver } from "./timing";
 import { Maybe, Just, just, nothing, isJust, isNothing, hasValue } from "./maybe";
 import { TimingException, MultipleAssignmentsException, UnexpectedNotificationException, UnassignedSinkException } from "./exceptions";
+import { log } from "./logger";
 
 export interface Observer {
   notify(sender: Observable, value: Maybe<any>): void;
@@ -78,41 +79,45 @@ export abstract class StreamBase<T> extends TickableBase implements CoreStream<T
 
 export abstract class Stream<T> extends StreamBase<T> {
 
-  public keepUntil(keepStream: (self: Stream<T>) => KeepStream, debugString = this.debugString) {
+  public keepUntil(keepStream: (self: Stream<T>) => KeepStream, debugString?: string): MulticastStream<T> {
     return new KeepUntilStream(this.clock, this, keepStream, debugString);
   }
 
-  public map<U>(project: (t: T) => U, debugString?: string): Stream<U> {
+  public keepAsLongAs<U>(owner$: Stream<U>, debugString?: string): MulticastStream<T> {
+    return new KeepAsLongAsStream(this.clock, this, owner$, debugString);
+  }
+
+  public map<U>(project: (t: T) => U, debugString?: string): UnicastStream<U> {
     return new MapStream(this.clock, this, project, debugString);
   }
 
-  public filter(predicate: (t: T) => boolean): Stream<T> {
+  public filter(predicate: (t: T) => boolean): UnicastStream<T> {
     return new FilterStream(this.clock, this, predicate);
   }
 
-  public mergeWith<U>(other$: CoreStream<U>): Stream<[Maybe<T>, Maybe<U>]>;
-  public mergeWith(...other$s: CoreStream<T>[]): Stream<Maybe<T>[]>;
-  public mergeWith(other$: CoreStream<any>): Stream<Maybe<any>[]> {
+  public mergeWith<U>(other$: CoreStream<U>): UnicastStream<[Maybe<T>, Maybe<U>]>;
+  public mergeWith(...other$s: CoreStream<T>[]): UnicastStream<Maybe<T>[]>;
+  public mergeWith(other$: CoreStream<any>): UnicastStream<Maybe<any>[]> {
     return new MergeStream<any>(this.clock, [this, other$]) as any;
   }
 
-  public fold<U>(reduce: (prev: U, curr: T) => U, initialState: U, debugString?: string): Stream<U> {
+  public fold<U>(reduce: (prev: U, curr: T) => U, initialState: U, debugString?: string): UnicastStream<U> {
     return new FoldStream(this.clock, this, reduce, initialState, debugString);
   }
 
-  public branchFold<U>(reduce: (prev: U, curr: T) => U, initial$: CoreStream<U>): Stream<U> {
+  public branchFold<U>(reduce: (prev: U, curr: T) => U, initial$: CoreStream<U>): UnicastStream<U> {
     return new BranchFoldStream(this.clock, this, reduce, initial$);
   }
 
-  public switch(this: Stream<T & CoreStream<any>>): T {
+  public switch<U>(this: Stream<T & CoreStream<U>>): UnicastStream<U> {
     return new SwitchStream(this.clock, this) as any;
   }
 
-  public flatten(this: Stream<T & CoreStream<any>>): T {
+  public flatten<U>(this: Stream<T & CoreStream<U>>): UnicastStream<U> {
     return new FlattenStream(this.clock, this) as any;
   }
 
-  public dropCurrent(): Stream<T> {
+  public dropCurrent(): UnicastStream<T> {
     return new DropCurrentStream(this.clock, this);
   }
 
@@ -131,49 +136,32 @@ export class UnicastStream<T> extends Stream<T> {
   }
 
   public unsubscribe(observer: Observer) {
+    log("unsubscribe", this.debugString);
     const changed = this.observers.has(observer);
     super.unsubscribe(observer);
 
     if (changed && this.observers.size === 0) {
+      log("scheduleDisposal", this.debugString);
       this.scheduleDisposal();
     }
   }
 }
 
-export class KeepAsLongAsStream<T, U> extends MulticastStream<T> {
-  constructor(clock: Clock, private readonly origin$: Stream<T>, private readonly owner$: Stream<U>, debugString = origin$.debugString) {
-    super(clock, debugString);
-    this.clock.register(this);
-  }
-
-  public initialize(state: TickState) {
-    super.initialize(state);
-
-    if (state === TickState.INITIALIZED || state === TickState.PASSIVE) {
-
-    }
-  }
-}
-
-export class KeepUntilStream<T> extends MulticastStream<T> {
-}
-
-export interface DisposalObservable {
-  subscribeDisposal(observer: (sender: this) => void);
-}
-
 export class MulticastStream<T> extends Stream<T> {
-  private readonly keep$: KeepStream;
+  protected disposalObservable: DisposalObservable;
 
   constructor(
     clock: Clock,
     private readonly main$: CoreStream<T>,
-    keepStream: (self: Stream<T>) => KeepStream,
     debugString = `${main$.debugString}.keepUntil`) {
 
     super(clock, debugString);
-    this.keep$ = keepStream(this);
-    this.clock.register(this);
+    // EXPECT to call initializeInConstructor from subclass constructor
+  }
+
+  public initializeInConstructor(observable: DisposalObservable) {
+    this.disposalObservable = observable;
+    this.clock.register(this); // TODO: move to subclasses?
   }
 
   public initialize(state: TickState) {
@@ -181,28 +169,25 @@ export class MulticastStream<T> extends Stream<T> {
 
     if (state === TickState.INITIALIZED || state === TickState.PASSIVE) {
       this.clock.getQueue().push(() => {
-        const mainMaybe = this.main$.getValue();
-        if (isJust(mainMaybe)) {
-          this.mainObserver.notify(this.main$, mainMaybe.value);
+        const maybe = this.main$.getValue();
+        if (isJust(maybe)) {
+          this.mainObserver.notify(this.main$, maybe.value);
         }
         this.main$.subscribe(this.mainObserver);
-
-        const keepMaybe = this.keep$.getValue();
-        if (isJust(keepMaybe)) {
-          this.keepObserver.notify(this.keep$, keepMaybe.value);
-        }
-        this.keep$.subscribe(this.keepObserver);
       });
     } else {
       this.main$.subscribe(this.mainObserver);
-      this.keep$.subscribe(this.keepObserver);
     }
+
+    this.disposalObservable.subscribeDisposal(this.disposalObserver);
   }
 
   public disposeNow() {
+    log("dispose now", this.debugString);
     super.disposeNow();
+    log("unsubscribe", this.main$.debugString, this.main$.unsubscribe.toString());
     this.main$.unsubscribe(this.mainObserver);
-    this.keep$.unsubscribe(this.keepObserver);
+    this.disposalObservable.unsubscribeDisposal(this.disposalObserver);
   }
 
   private mainObserver: Observer = {
@@ -213,15 +198,93 @@ export class MulticastStream<T> extends Stream<T> {
     recipient: just(this)
   };
 
+  private disposalObserver: DisposalObserver = sender => {
+    if (sender !== this.disposalObservable) throw new UnexpectedNotificationException();
+
+    this.scheduleDisposal();
+  };
+}
+
+export class KeepUntilStream<T> extends MulticastStream<T> {
+  private trackedDisposalObservers = new Set<DisposalObserver>();
+  private keep$: KeepStream;
+  private listening = false;
+
+  constructor(
+    clock: Clock,
+    main$: CoreStream<T>,
+    keepStream: (self: KeepUntilStream<T>) => KeepStream,
+    debugString = `${main$.debugString}.keepUntil`) {
+
+    super(clock, main$, debugString);
+    this.keep$ = keepStream(this);
+    this.initializeInConstructor(this.getDisposalObservable());
+  }
+
+  public getDisposalObservable(): DisposalObservable {
+    return {
+      subscribeDisposal: observer => this.handleDisposalSubscription(observer),
+      unsubscribeDisposal: observer => this.unsubscribeDisposal(observer)
+    };
+  }
+
+  private handleDisposalSubscription(observer: DisposalObserver) {
+    this.trackedDisposalObservers.add(observer);
+    // TODO: Also check current value of keep stream
+    this.updateState();
+  }
+
+  private handleDisposalUnsubscription(observer: DisposalObserver) {
+    this.trackedDisposalObservers.delete(observer);
+    this.updateState();
+  }
+
+  private updateState() {
+    if (this.trackedDisposalObservers.size === 0 && this.listening) {
+      this.unsubscribeFromKeepStream();
+    } else if (this.trackedDisposalObservers.size > 0 && !this.listening) {
+      this.subscribeToKeepStream();
+    }
+  }
+
+  private subscribeToKeepStream() {
+    this.listening = true;
+    if (this.state === TickState.INITIALIZED || this.state === TickState.PASSIVE) {
+      this.clock.getQueue().push(() => {
+        if (!this.listening) return;
+        const maybe = this.keep$.getValue();
+        if (isJust(maybe)) {
+          this.keepObserver.notify(this.keep$, maybe.value);
+        }
+        this.keep$.subscribe(this.keepObserver);
+      });
+    } else {
+      this.keep$.subscribe(this.keepObserver);
+    }
+  }
+
+  private unsubscribeFromKeepStream() {
+    this.keep$.unsubscribe(this.keepObserver);
+    this.listening = false;
+  }
+
   private keepObserver: Observer = {
-    notify: (sender: Observable, value: Maybe<any>) => {
-      this.expectSender(sender, this.keep$);
+    notify: (sender, value) => {
+      (sender === this.keep$) || (() => {throw new UnexpectedNotificationException()})();
       if (isJust(value) && value.value === false) {
-        this.scheduleDisposal();
+        this.trackedDisposalObservers.forEach(observer => observer(this.disposalObservable));
       }
     },
     recipient: just(this)
   };
+}
+
+export class KeepAsLongAsStream<T, U> extends MulticastStream<T> {
+
+  constructor(clock: Clock, origin$: Stream<T>, private readonly owner$: Stream<U>, debugString = origin$.debugString) {
+    super(clock, origin$, debugString);
+    this.initializeInConstructor(owner$);
+  }
 }
 
 export class SourceStream<T> extends UnicastStream<T> {
@@ -273,7 +336,7 @@ export class NeverStream extends UnicastStream<never> {
   }
 }
 
-export class MapStream<T, U> extends Stream<U> {
+export class MapStream<T, U> extends UnicastStream<U> {
   constructor(
     clock: Clock,
     private readonly origin: CoreStream<T>,
@@ -315,11 +378,12 @@ export class MapStream<T, U> extends Stream<U> {
 
   public disposeNow() {
     super.disposeNow();
+    log("dispose map", this.debugString);
     this.origin.unsubscribe(this.observer);
   }
 }
 
-export class FilterStream<T> extends Stream<T> {
+export class FilterStream<T> extends UnicastStream<T> {
   constructor(
     clock: Clock,
     private readonly origin: CoreStream<T>,
@@ -364,7 +428,7 @@ export class FilterStream<T> extends Stream<T> {
   };
 }
 
-export class MergeStream<T> extends Stream<Maybe<T>[]> {
+export class MergeStream<T> extends UnicastStream<Maybe<T>[]> {
   private readonly values: TimedMaybe<Maybe<T>>[];
   private readonly origins: CoreStream<T>[];
 
@@ -445,7 +509,7 @@ export class MergeStream<T> extends Stream<Maybe<T>[]> {
   }
 }
 
-export class FoldStream<T, U> extends Stream<U> {
+export class FoldStream<T, U> extends UnicastStream<U> {
   private foldState: U;
 
   constructor(
@@ -494,7 +558,7 @@ export class FoldStream<T, U> extends Stream<U> {
   }
 }
 
-export class BranchFoldStream<T, U> extends Stream<U> {
+export class BranchFoldStream<T, U> extends UnicastStream<U> {
   private foldState: U;
   private hasInitialValue = false;
   private hasSubscribedToAction = false;
@@ -568,7 +632,7 @@ export class BranchFoldStream<T, U> extends Stream<U> {
   };
 }
 
-export class FlattenStream<T> extends Stream<T> {
+export class FlattenStream<T> extends UnicastStream<T> {
   private stream: TimedMaybe<Maybe<CoreStream<T>>> = new TimedMaybe<Maybe<CoreStream<T>>>(() => {}, this.debugString);
 
   constructor(
@@ -641,7 +705,7 @@ export class FlattenStream<T> extends Stream<T> {
   };
 }
 
-export class SwitchStream<T> extends Stream<T> {
+export class SwitchStream<T> extends UnicastStream<T> {
   private lastStream: Maybe<CoreStream<T>> = nothing();
   private nextStream: TimedMaybe<Maybe<CoreStream<T>>>;
   private running = false;
@@ -730,7 +794,7 @@ export class SwitchStream<T> extends Stream<T> {
   }
 }
 
-export class DropCurrentStream<T> extends Stream<T> {
+export class DropCurrentStream<T> extends UnicastStream<T> {
   private subscriptionPending = true;
 
   constructor(
@@ -768,7 +832,7 @@ export class DropCurrentStream<T> extends Stream<T> {
   };
 }
 
-export class MimicStream<T> extends Stream<T> {
+export class MimicStream<T> extends UnicastStream<T> {
   private original: Maybe<CoreStream<T>> = nothing();
 
   constructor(clock: Clock, debugStream = "mimic") {
